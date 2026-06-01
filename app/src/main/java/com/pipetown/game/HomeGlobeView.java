@@ -61,6 +61,10 @@ public class HomeGlobeView extends GLSurfaceView {
         this.listener = listener;
     }
 
+    void setCalibrationProfile(CalibrationProfile profile) {
+        queueEvent(() -> renderer.setCalibrationProfile(profile));
+    }
+
     void setMaxUnlocked(int maxUnlocked) {
         renderer.setMaxUnlocked(maxUnlocked);
     }
@@ -113,7 +117,7 @@ public class HomeGlobeView extends GLSurfaceView {
                 performClick();
                 if (!moved && listener != null) {
                     int level = renderer.hitLevel(event.getX(), event.getY());
-                    if (level > 0) {
+                    if (level >= 0) {
                         selectingLevel = true;
                         queueEvent(() -> renderer.playSelectLevel(level));
                         postDelayed(() -> selectingLevel = false, 1200L);
@@ -138,7 +142,7 @@ public class HomeGlobeView extends GLSurfaceView {
 
     private static final class GlobeRenderer implements Renderer {
         private static final float RADIUS = 2.02f;
-        private static final float CENTER_Y = -1.78f;
+        private static final float CENTER_Y = -1.95f;
         private static final float CAMERA_Z = 5.05f;
         private static final float LEVEL_SPACING = 0.44f;
         private static final float LEVEL_BASE_THETA = 0.94f;
@@ -151,9 +155,10 @@ public class HomeGlobeView extends GLSurfaceView {
         private static final long FOCUS_END_BUFFER_MS = 180L;
         private static final long CELEBRATION_GLOW_MS = 2800L;
         private static final long SELECT_ANIMATION_MS = 920L;
-        private static final int SPHERE_SLICES = 64;
-        private static final int SPHERE_STACKS = 42;
+        private static final int SPHERE_SLICES = 96;
+        private static final int SPHERE_STACKS = 72;
         private static final int PATH_SAMPLES = 18;
+        private static final float LOGO_ASPECT = 1154f / 866f;
         private static final DecorSpec[] DECOR = {
                 new DecorSpec("art/blockers/tree_1x1.png", 0.15f, 1.00f, 1.04f, true),
                 new DecorSpec("art/blockers/tree_1x2.png", 0.18f, 1.00f, 1.08f, true),
@@ -216,6 +221,7 @@ public class HomeGlobeView extends GLSurfaceView {
         private int height;
         private volatile float scrollRadians;
         private volatile int maxUnlocked = 1;
+        private volatile CalibrationProfile calibrationProfile = CalibrationProfile.fromCode(CalibrationProfile.DEFAULT_CODE);
         private boolean autoAnimating;
         private float animationStartScroll;
         private float animationTargetScroll;
@@ -236,6 +242,14 @@ public class HomeGlobeView extends GLSurfaceView {
             animationTargetScroll = clampScroll(animationTargetScroll);
         }
 
+        void setCalibrationProfile(CalibrationProfile profile) {
+            calibrationProfile = profile == null ? CalibrationProfile.fromCode(CalibrationProfile.DEFAULT_CODE) : profile;
+            levelTextureCache.clear();
+            if (sphereProgram != 0) {
+                buildSphere();
+            }
+        }
+
         void focusLevel(int level) {
             scrollRadians = targetScrollForLevel(level);
             autoAnimating = false;
@@ -246,7 +260,7 @@ public class HomeGlobeView extends GLSurfaceView {
         }
 
         void animateToLevel(int level, boolean celebrate) {
-            int targetLevel = Math.max(1, level);
+            int targetLevel = Math.max(0, level);
             animationStartScroll = scrollRadians;
             animationTargetScroll = targetScrollForLevel(targetLevel);
             animationStartMs = SystemClock.uptimeMillis();
@@ -256,7 +270,7 @@ public class HomeGlobeView extends GLSurfaceView {
         }
 
         void playSelectLevel(int level) {
-            selectedLevel = Math.max(1, level);
+            selectedLevel = Math.max(0, level);
             selectedStartMs = SystemClock.uptimeMillis();
         }
 
@@ -292,7 +306,6 @@ public class HomeGlobeView extends GLSurfaceView {
             skyProgram = makeProgram(SKY_VERTEX, SKY_FRAGMENT);
             buildSphere();
             sphereTexture = loadSphereTexture();
-            preloadDecorTextures();
         }
 
         @Override
@@ -312,8 +325,8 @@ public class HomeGlobeView extends GLSurfaceView {
             drawSphere(scroll);
             ArrayList<HitLevel> frameHits = new ArrayList<>();
             drawPaths(scroll);
-            drawDecor(scroll);
             drawLevels(scroll, frameHits, selectionT);
+            drawFloatingLogo(selectionT);
             synchronized (hitLevels) {
                 hitLevels.clear();
                 hitLevels.addAll(frameHits);
@@ -413,7 +426,7 @@ public class HomeGlobeView extends GLSurfaceView {
 
         private void drawPaths(float scroll) {
             int anchor = anchorLevel(scroll);
-            int first = Math.max(1, anchor - 2);
+            int first = Math.max(0, anchor - 2);
             int last = Math.min(anchor + 8, maxScrollableLevel());
             float celebrationT = celebrationProgress();
             for (int level = first; level < last; level++) {
@@ -440,7 +453,7 @@ public class HomeGlobeView extends GLSurfaceView {
         private void drawLevels(float scroll, ArrayList<HitLevel> frameHits, float selectionT) {
             GLES20.glDisable(GLES20.GL_DEPTH_TEST);
             int anchor = anchorLevel(scroll);
-            int first = Math.max(1, anchor - 3);
+            int first = Math.max(0, anchor - 3);
             int last = Math.min(anchor + 9, maxScrollableLevel());
             for (int level = last; level >= first; level--) {
                 SurfacePoint p = surfacePoint(level, scroll);
@@ -449,22 +462,26 @@ public class HomeGlobeView extends GLSurfaceView {
                 }
                 int texture = levelTexture(level);
                 float scale = 0.72f + 0.35f * p.normal.z;
-                float size = 0.24f * scale;
+                CalibrationProfile.Layer nodeTune = calibrationProfile.layer("M", "level", 'A');
+                float sizeW = 0.24f * scale * nodeTune.scaleX;
+                float sizeH = 0.24f * scale * nodeTune.scaleY;
                 float alpha = level <= maxUnlocked ? 1f : 0.50f;
                 float selectT = level == selectedLevel ? selectionT : 0f;
                 if (selectT > 0f && selectT < 1f) {
-                    size *= 1f + 0.05f * selectT;
+                    sizeW *= 1f + 0.05f * selectT;
+                    sizeH *= 1f + 0.05f * selectT;
                     alpha = 1f;
                 }
                 float glow = celebrationGlow(level);
                 if (selectT > 0f && selectT < 1f) {
-                    float glowSize = size * (2.40f + selectT * 0.40f);
-                    drawSurfaceSprite(glowTexture(), p.normal, glowSize, glowSize, 0.052f, 0f, 0f, new float[]{1f, 1f, 1f, 0.34f * (1f - selectT * 0.25f)});
+                    float glowW = sizeW * (2.40f + selectT * 0.40f);
+                    float glowH = sizeH * (2.40f + selectT * 0.40f);
+                    drawSurfaceSprite(glowTexture(), p.normal, p.surfaceRadius, glowW, glowH, 0.052f, 0f, 0f, new float[]{1f, 1f, 1f, 0.34f * (1f - selectT * 0.25f)});
                 } else if (glow > 0f) {
                     float pulse = 1f + 0.08f * (float) Math.sin(SystemClock.uptimeMillis() * 0.0065f);
-                    drawSurfaceSprite(glowTexture(), p.normal, size * 2.55f * pulse, size * 2.55f * pulse, 0.045f, 0f, 0f, new float[]{1f, 1f, 1f, glow});
+                    drawSurfaceSprite(glowTexture(), p.normal, p.surfaceRadius, sizeW * 2.55f * pulse, sizeH * 2.55f * pulse, 0.045f, 0f, 0f, new float[]{1f, 1f, 1f, glow});
                 }
-                drawSurfaceSprite(texture, p.normal, size, size, 0.055f, 0f, 0f, new float[]{1f, 1f, 1f, alpha});
+                drawSurfaceSprite(texture, p.normal, p.surfaceRadius, sizeW, sizeH, 0.055f, 0f, 0f, new float[]{1f, 1f, 1f, alpha});
                 float[] screen = project(p.world.x, p.world.y, p.world.z);
                 if (screen != null) {
                     frameHits.add(new HitLevel(level, screen[0], screen[1], Math.max(82f, width * 0.085f * scale)));
@@ -473,45 +490,81 @@ public class HomeGlobeView extends GLSurfaceView {
             GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         }
 
+        private void drawFloatingLogo(float selectionT) {
+            int texture = loadTexture("art/logo/logo.png");
+            if (texture == 0) {
+                return;
+            }
+            CalibrationProfile.Layer tune = calibrationProfile.layer("M", "logo", 'A');
+            float eased = selectionT * selectionT * (3f - 2f * selectionT);
+            float bob = (float) Math.sin(SystemClock.uptimeMillis() * 0.0017f) * 0.026f;
+            float x = tune.x * 0.006f;
+            float y = 0.48f - tune.y * 0.006f + bob;
+            float z = 0.42f;
+            float uniformScale = Math.max(0.20f, (tune.scaleX + tune.scaleY) * 0.5f);
+            float width = 0.86f * uniformScale * (1f - eased * 0.07f);
+            float height = width / LOGO_ASPECT;
+            drawBillboardSprite(texture, new Vec3(x, y, z), width, height,
+                    new float[]{1f, 1f, 1f, 1f});
+        }
+
         private void drawDecor(float scroll) {
-            int base = Math.max(0, (int) ((scroll - 2.95f) / DECOR_STEP));
+            CalibrationProfile.Layer decorTune = calibrationProfile.layer("P", "decor", 'A');
+            float step = DECOR_STEP / clamp(decorTune.scaleX, 0.30f, 3.00f);
+            float lonRange = 1.16f * clamp(decorTune.scaleY, 0.25f, 2.25f);
+            float lonOffset = (float) Math.toRadians(decorTune.x);
+            float standingAngle = clamp(45f + decorTune.y, 10f, 85f);
+            int base = Math.max(0, (int) ((scroll - 2.95f) / step));
             for (int i = base; i < base + 176; i++) {
                 Random seeded = new Random(91_731L + i * 13_337L);
-                float theta = -0.35f + i * DECOR_STEP;
-                float lon = -0.72f + seeded.nextFloat() * 1.44f;
+                float theta = -0.35f + i * step;
+                float lon = lonOffset - lonRange + seeded.nextFloat() * lonRange * 2f;
                 Vec3 normal = mapNormal(theta, lon, scroll);
-                if (normal.z < -0.28f) {
+                if (normal.z < 0.18f) {
                     continue;
                 }
-                if (nearVisibleLevelOrPath(theta, lon, scroll)) {
+                float surfaceRadius = RADIUS;
+                Vec3 worldBase = globeCenter.plus(normal.times(surfaceRadius + 0.02f));
+                float[] screen = project(worldBase.x, worldBase.y, worldBase.z);
+                // Leave only the central skyline clean for the logo and the road crest.
+                if (screen != null && screen[1] < height * 0.25f
+                        && screen[0] > width * 0.20f && screen[0] < width * 0.80f) {
                     continue;
                 }
                 DecorSpec spec = DECOR[Math.abs(i) % DECOR.length];
+                if (nearLevelOrPath(theta, lon, scroll, spec)) {
+                    continue;
+                }
                 int texture = loadTexture(spec.asset);
                 float scale = decorVisualSize(spec) * (0.90f + seeded.nextFloat() * 0.20f);
                 if (spec.standing) {
-                    drawStandingSprite(texture, normal, scale, scale, 0.016f, 0f, new float[]{1f, 1f, 1f, 0.92f});
+                    drawStandingSprite(texture, normal, surfaceRadius, scale, scale, 0.016f, 0f, standingAngle, new float[]{1f, 1f, 1f, 0.92f});
                 } else {
-                    drawSurfaceSprite(texture, normal, scale, scale, 0.026f, 0f, 0f, new float[]{1f, 1f, 1f, 0.90f});
+                    drawSurfaceSprite(texture, normal, surfaceRadius, scale, scale, 0.026f, 0f, 0f, new float[]{1f, 1f, 1f, 0.90f});
                 }
             }
         }
 
-        private boolean nearVisibleLevelOrPath(float theta, float lon, float scroll) {
+        private boolean nearLevelOrPath(float theta, float lon, float scroll, DecorSpec spec) {
             int anchor = anchorLevel(scroll);
-            for (int level = Math.max(1, anchor - 3); level <= Math.min(anchor + 8, maxScrollableLevel()); level++) {
+            float decorClearance = decorVisualSize(spec) * (spec.standing ? 2.15f : 1.65f);
+            float levelThetaGap = 0.30f + decorClearance;
+            float levelLonGap = 0.27f + decorClearance;
+            for (int level = Math.max(1, anchor - 9); level <= Math.min(anchor + 14, maxScrollableLevel()); level++) {
                 float levelTheta = levelTheta(level);
                 float levelLon = levelLon(level);
-                if (Math.abs(theta - levelTheta) < 0.31f && Math.abs(lon - levelLon) < 0.34f) {
+                if (Math.abs(theta - levelTheta) < levelThetaGap && Math.abs(lon - levelLon) < levelLonGap) {
                     return true;
                 }
             }
-            for (int level = Math.max(1, anchor - 4); level < Math.min(anchor + 9, maxScrollableLevel()); level++) {
-                for (int i = 0; i <= 8; i++) {
-                    float t = i / 8f;
+            float pathThetaGap = 0.21f + decorClearance;
+            float pathLonGap = 0.20f + decorClearance;
+            for (int level = Math.max(1, anchor - 10); level < Math.min(anchor + 15, maxScrollableLevel()); level++) {
+                for (int i = 0; i <= 12; i++) {
+                    float t = i / 12f;
                     float pathTheta = lerp(levelTheta(level), levelTheta(level + 1), t);
                     float pathLon = pathLon(level, level + 1, t);
-                    if (Math.abs(theta - pathTheta) < 0.14f && Math.abs(lon - pathLon) < 0.16f) {
+                    if (Math.abs(theta - pathTheta) < pathThetaGap && Math.abs(lon - pathLon) < pathLonGap) {
                         return true;
                     }
                 }
@@ -569,7 +622,8 @@ public class HomeGlobeView extends GLSurfaceView {
                     + (float) Math.sin(t * Math.PI * 5f + seed * 0.37f) * 0.012f;
         }
 
-        private void drawStandingSprite(int texture, Vec3 normal, float width, float height, float altitude, float rightShift, float[] tint) {
+        private void drawStandingSprite(int texture, Vec3 normal, float surfaceRadius, float width, float height,
+                                        float altitude, float rightShift, float angle, float[] tint) {
             if (texture == 0 || normal.z < -0.28f) {
                 return;
             }
@@ -578,8 +632,9 @@ public class HomeGlobeView extends GLSurfaceView {
                 right = new Vec3(1f, 0f, 0f);
             }
             Vec3 surfaceUp = normal.cross(right).normalize();
-            Vec3 standUp = surfaceUp.times(0.70f).plus(normal.times(0.70f)).normalize();
-            Vec3 base = globeCenter.plus(normal.times(RADIUS + altitude)).plus(right.times(rightShift));
+            float radians = (float) Math.toRadians(angle);
+            Vec3 standUp = surfaceUp.times((float) Math.cos(radians)).plus(normal.times((float) Math.sin(radians))).normalize();
+            Vec3 base = globeCenter.plus(normal.times(surfaceRadius + altitude)).plus(right.times(rightShift));
             Vec3 a = base.minus(right.times(width * 0.5f));
             Vec3 b = base.plus(right.times(width * 0.5f));
             Vec3 c = b.plus(standUp.times(height));
@@ -588,7 +643,7 @@ public class HomeGlobeView extends GLSurfaceView {
             drawPreparedSprite(texture, tint);
         }
 
-        private void drawSurfaceSprite(int texture, Vec3 normal, float width, float height, float altitude, float rightShift, float upShift, float[] tint) {
+        private void drawSurfaceSprite(int texture, Vec3 normal, float surfaceRadius, float width, float height, float altitude, float rightShift, float upShift, float[] tint) {
             if (texture == 0 || normal.z < -0.28f) {
                 return;
             }
@@ -597,7 +652,18 @@ public class HomeGlobeView extends GLSurfaceView {
                 right = new Vec3(1f, 0f, 0f);
             }
             Vec3 up = normal.cross(right).normalize();
-            Vec3 center = globeCenter.plus(normal.times(RADIUS + altitude)).plus(right.times(rightShift)).plus(up.times(upShift));
+            Vec3 center = globeCenter.plus(normal.times(surfaceRadius + altitude)).plus(right.times(rightShift)).plus(up.times(upShift));
+            Vec3 a = center.minus(right.times(width * 0.5f)).minus(up.times(height * 0.5f));
+            Vec3 b = center.plus(right.times(width * 0.5f)).minus(up.times(height * 0.5f));
+            Vec3 c = center.plus(right.times(width * 0.5f)).plus(up.times(height * 0.5f));
+            Vec3 d = center.minus(right.times(width * 0.5f)).plus(up.times(height * 0.5f));
+            putQuad(a, b, c, d);
+            drawPreparedSprite(texture, tint);
+        }
+
+        private void drawBillboardSprite(int texture, Vec3 center, float width, float height, float[] tint) {
+            Vec3 right = new Vec3(1f, 0f, 0f);
+            Vec3 up = new Vec3(0f, 1f, 0f);
             Vec3 a = center.minus(right.times(width * 0.5f)).minus(up.times(height * 0.5f));
             Vec3 b = center.plus(right.times(width * 0.5f)).minus(up.times(height * 0.5f));
             Vec3 c = center.plus(right.times(width * 0.5f)).plus(up.times(height * 0.5f));
@@ -652,9 +718,10 @@ public class HomeGlobeView extends GLSurfaceView {
             float theta = levelTheta(level);
             float lon = levelLon(level);
             Vec3 normal = mapNormal(theta, lon, scroll);
-            Vec3 world = globeCenter.plus(normal.times(RADIUS + 0.09f));
+            float surfaceRadius = RADIUS;
+            Vec3 world = globeCenter.plus(normal.times(surfaceRadius + 0.09f));
             boolean visible = normal.z > 0.18f;
-            return new SurfacePoint(normal, world, visible);
+            return new SurfacePoint(normal, world, surfaceRadius, visible);
         }
 
         private Vec3 mapNormal(float theta, float lon, float scroll) {
@@ -705,7 +772,7 @@ public class HomeGlobeView extends GLSurfaceView {
         }
 
         private int anchorLevel(float scroll) {
-            return Math.max(1, (int) Math.floor((scroll - LEVEL_BASE_THETA + LEVEL_FOCUS_THETA + 0.18f) / LEVEL_SPACING) + 1);
+            return Math.max(0, (int) Math.floor((scroll - LEVEL_BASE_THETA + LEVEL_FOCUS_THETA + 0.18f) / LEVEL_SPACING) + 1);
         }
 
         private float targetScrollForLevel(int level) {
@@ -713,7 +780,7 @@ public class HomeGlobeView extends GLSurfaceView {
         }
 
         private float rawTargetScrollForLevel(int level) {
-            return Math.max(0f, levelTheta(Math.max(1, level)) - LEVEL_FOCUS_THETA);
+            return Math.max(0f, levelTheta(Math.max(0, level)) - LEVEL_FOCUS_THETA);
         }
 
         private float clampScroll(float scroll) {
@@ -842,42 +909,108 @@ public class HomeGlobeView extends GLSurfaceView {
             sphereIndexCount = indices.length;
         }
 
-        private void preloadDecorTextures() {
-            loadTexture("art/icons/level.png");
-            for (DecorSpec spec : DECOR) {
-                loadTexture(spec.asset);
-            }
-        }
-
         private int levelTexture(int level) {
             Integer cached = levelTextureCache.get(level);
             if (cached != null) {
                 return cached;
             }
-            Bitmap base = bitmapFromAssets("art/icons/level.png");
-            if (base == null) {
-                return 0;
-            }
+            int tier = level <= 0 ? 0 : Math.min(9, (level - 1) / 10);
+            int[] clothLight = {0xFF60D3C4, 0xFF54CDB7, 0xFF4EC5A3, 0xFF55B98C, 0xFF76B56C,
+                    0xFF9CB050, 0xFFCBAC43, 0xFFE49742, 0xFFE57A4A, 0xFFD85B56};
+            int[] clothDark = {0xFF176F78, 0xFF186D72, 0xFF1D6966, 0xFF29695B, 0xFF46663E,
+                    0xFF615A30, 0xFF725027, 0xFF80402A, 0xFF7B3031, 0xFF67243A};
+            Random variant = new Random(LEVEL_LANE_SEED ^ level * 72_991L);
+            float patchTilt = (variant.nextInt(7) - 3) * 1.25f;
             Bitmap bitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888);
             Canvas canvas = new Canvas(bitmap);
             Paint p = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG | Paint.DITHER_FLAG);
-            RectF dest = new RectF(0, 0, 256, 256);
-            canvas.drawBitmap(base, null, dest, p);
+            canvas.save();
+            canvas.rotate(patchTilt, 128f, 126f);
+            p.setColor(0x42142B32);
+            canvas.drawOval(new RectF(38f, 207f, 218f, 237f), p);
+            p.setShader(new RadialGradient(104f, 82f, 127f,
+                    new int[]{clothLight[tier], clothLight[tier], clothDark[tier]},
+                    new float[]{0f, 0.62f, 1f}, Shader.TileMode.CLAMP));
+            RectF patch = new RectF(25f, 22f, 231f, 224f);
+            canvas.drawRoundRect(patch, 48f, 48f, p);
+            p.setShader(null);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(8f);
+            p.setColor(0xFF493424);
+            canvas.drawRoundRect(patch, 48f, 48f, p);
+            p.setStrokeWidth(3f);
+            p.setColor(0xFFE8CE94);
+            for (int i = 0; i < 28; i++) {
+                float angle = (float) Math.PI * 2f * i / 28f;
+                float x1 = 128f + (float) Math.cos(angle) * 92f;
+                float y1 = 123f + (float) Math.sin(angle) * 88f;
+                float x2 = 128f + (float) Math.cos(angle) * 99f;
+                float y2 = 123f + (float) Math.sin(angle) * 95f;
+                canvas.drawLine(x1, y1, x2, y2, p);
+            }
+            p.setStyle(Paint.Style.FILL);
+            p.setShader(new RadialGradient(108f, 92f, 97f,
+                    new int[]{0xFFFFFBEC, 0xFFFFE3A3, 0xFFF4BF5A},
+                    new float[]{0f, 0.70f, 1f}, Shader.TileMode.CLAMP));
+            canvas.drawRoundRect(new RectF(45f, 43f, 211f, 201f), 38f, 38f, p);
+            p.setShader(null);
             p.setTextAlign(Paint.Align.CENTER);
             p.setFakeBoldText(true);
-            p.setTextSize(level >= 100 ? 70f : level >= 10 ? 82f : 92f);
-            String text = String.format(Locale.US, "%d", level);
+            p.setTextSize(level == 0 ? 17f : 19f);
+            p.setColor(clothDark[tier]);
+            canvas.drawText(level == 0 ? "TUTORIAL" : "LEVEL", 128f, 76f, p);
+            p.setTextAlign(Paint.Align.CENTER);
+            CalibrationProfile.Layer textTune = calibrationProfile.layer("M", "level", 'T');
+            p.setTextSize((level == 0 ? 57f : level >= 100 ? 60f : level >= 10 ? 69f : 78f) * textTune.scaleY);
+            String text = level == 0 ? "START" : String.format(Locale.US, "%d", level);
             p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(13f);
-            p.setColor(Color.BLACK);
-            canvas.drawText(text, 128f, 148f, p);
+            p.setStrokeWidth(level == 0 ? 5f : 7f);
+            p.setColor(0xFFFFFFFF);
+            canvas.save();
+            canvas.scale(textTune.scaleX / Math.max(0.01f, textTune.scaleY), 1f, 128f + textTune.x, 143f + textTune.y);
+            canvas.drawText(text, 128f + textTune.x, level == 0 ? 142f + textTune.y : 148f + textTune.y, p);
             p.setStyle(Paint.Style.FILL);
-            p.setColor(Color.WHITE);
-            canvas.drawText(text, 128f, 148f, p);
+            p.setColor(0xFF273C43);
+            canvas.drawText(text, 128f + textTune.x, level == 0 ? 142f + textTune.y : 148f + textTune.y, p);
+            canvas.restore();
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(0xDC274B59);
+            canvas.drawRoundRect(new RectF(47f, 158f, 209f, 213f), 23f, 23f, p);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(2.5f);
+            p.setColor(0xFFE5CF95);
+            canvas.drawRoundRect(new RectF(47f, 158f, 209f, 213f), 23f, 23f, p);
+            p.setStyle(Paint.Style.FILL);
+            for (int i = 0; i < 3; i++) {
+                boolean earned = level == 0 || i <= tier / 4;
+                float starX = 82f + i * 46f;
+                drawBadgeStar(canvas, p, starX, 185f, 20f, 0xFF173844);
+                drawBadgeStar(canvas, p, starX, 185f, 16f, earned ? 0xFF55D4EE : 0xFF8EAAA9);
+                drawBadgeStar(canvas, p, starX, 182.5f, 8f, earned ? 0xFFE8FFFF : 0xFFCDD9D4);
+            }
+            canvas.restore();
             int texture = textureFromBitmap(bitmap, false);
             bitmap.recycle();
             levelTextureCache.put(level, texture);
             return texture;
+        }
+
+        private void drawBadgeStar(Canvas canvas, Paint paint, float x, float y, float radius, int color) {
+            android.graphics.Path star = new android.graphics.Path();
+            for (int i = 0; i < 10; i++) {
+                float angle = -(float) Math.PI * 0.5f + i * (float) Math.PI / 5f;
+                float r = (i & 1) == 0 ? radius : radius * 0.43f;
+                float px = x + (float) Math.cos(angle) * r;
+                float py = y + (float) Math.sin(angle) * r;
+                if (i == 0) {
+                    star.moveTo(px, py);
+                } else {
+                    star.lineTo(px, py);
+                }
+            }
+            star.close();
+            paint.setColor(color);
+            canvas.drawPath(star, paint);
         }
 
         private int loadSphereTexture() {
@@ -1032,11 +1165,13 @@ public class HomeGlobeView extends GLSurfaceView {
     private static final class SurfacePoint {
         final Vec3 normal;
         final Vec3 world;
+        final float surfaceRadius;
         final boolean visible;
 
-        SurfacePoint(Vec3 normal, Vec3 world, boolean visible) {
+        SurfacePoint(Vec3 normal, Vec3 world, float surfaceRadius, boolean visible) {
             this.normal = normal;
             this.world = world;
+            this.surfaceRadius = surfaceRadius;
             this.visible = visible;
         }
     }
